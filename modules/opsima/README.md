@@ -1,27 +1,29 @@
-# terraform-aws-opsima-remote-access
+# terraform-aws-opsima
 
-Terraform re-implementation of Opsima's "full access" CloudFormation onboarding
-stack (`opsima-cloud_formation-full_access.yaml`), packaged as a reusable
-module so it can be dropped into multiple repos instead of copy-pasting a
-CloudFormation template.
+Terraform re-implementation of Opsima's "full access" onboarding, packaged as a
+reusable module.
 
 It creates:
 
 - An optional S3 bucket for Cost & Usage Reports (`opsima-cur-<customer_short_id>`)
   with a bucket policy that denies insecure transport and allows the
   `bcm-data-exports.amazonaws.com` service to write reports.
-- An optional AWS Organizations Organizational Unit for Opsima-managed
-  accounts.
+- The Opsima Organizational Unit (`opsima-<customer_short_id>`) for
+  Opsima-managed accounts. Always created by this module — it is the boundary
+  the security model depends on, so it is not an input.
 - The `OpsimaRemoteAccessRole` IAM role (assumable only by Opsima's account,
   gated by an external ID) and its inline policy.
-- The CloudFormation "handshake" custom resource that tells Opsima the setup
-  is done, run as a one-resource nested CloudFormation stack.
+
+Onboarding is finished by pasting the `role_arn` and `organizational_unit_id`
+outputs into Opsima's UI. The old `Custom::OpsimaHandshake` SNS notification is
+**not** implemented — it required a nested CloudFormation stack, which we don't
+ship.
 
 ## Usage
 
-Apply this module from your AWS Organization's **management account**, same as
-the original CloudFormation stack — `organizations:CreateAccount`,
-`MoveAccount`, and the OU resource all require that.
+Apply this module from your AWS Organization's **management account**, same as the original
+CloudFormation stack - the OU, `organizations:CreateAccount`, and `MoveAccount`
+all require that.
 
 ```hcl
 terraform {
@@ -38,8 +40,8 @@ provider "aws" {
   region = "us-east-1"
 }
 
-module "opsima_remote_access" {
-  source = "git::https://github.com/<you>/terraform-aws-opsima-remote-access.git?ref=v1.0.0"
+module "opsima" {
+  source = "git::https://github.com/<you>/terraform-aws-opsima.git//modules/opsima?ref=v1.0.0"
 
   # Values Opsima gave you when you started the "connect AWS account" flow.
   external_id       = var.opsima_external_id
@@ -50,18 +52,22 @@ module "opsima_remote_access" {
   organization_id      = var.organization_id
   organization_root_id = var.organization_root_id
 
-  # Leave at defaults unless Opsima told you otherwise.
-  create_cur_bucket                = true
-  create_opsima_organizational_unit = true
-  opsima_organizational_unit_id     = ""
-  opsima_invoice_unit_arn           = ""
-
   tags = {
     environment = "shared"
     managed_by  = "terraform"
   }
 }
 
+output "opsima_role_arn" {
+  value = module.opsima.role_arn
+}
+
+output "opsima_ou_id" {
+  value = module.opsima.organizational_unit_id
+}
+
+# The var.* placeholders above have to be declared. Pass the values with a
+# tfvars file, -var flags, or TF_VAR_ environment variables.
 variable "opsima_external_id" {
   type      = string
   sensitive = true
@@ -76,19 +82,9 @@ variable "opsima_customer_short_id" {
 }
 variable "organization_id" { type = string }
 variable "organization_root_id" { type = string }
-
-output "opsima_role_arn" {
-  value = module.opsima_remote_access.role_arn
-}
 ```
 
 ## Inputs
-
-The first nine come from Opsima or your Organization and map 1:1 to the
-CloudFormation parameters — leave them as Opsima instructs (they're all marked
-`(DO NOT CHANGE)` in `variables.tf`, and most have a `validation` block that
-rejects a malformed value). The last five are module-only conveniences with no
-CloudFormation equivalent.
 
 | Name | Description | Type | Default | Required |
 |---|---|---|---|---|
@@ -97,13 +93,7 @@ CloudFormation equivalent.
 | `customer_short_id` | Short ID Opsima generated (10 hex chars). Sensitive. | `string` | n/a | yes |
 | `organization_id` | Your AWS Organization ID (`o-xxxxxxxxxx`). | `string` | n/a | yes |
 | `organization_root_id` | Your AWS Organization root ID (`r-xxxx`). | `string` | n/a | yes |
-| `opsima_organizational_unit_id` | Existing OU (`ou-xxxx-xxxxxxxx`) to use instead of creating one. | `string` | `""` | no |
-| `opsima_invoice_unit_arn` | Existing Invoice Unit ARN (Opsima creates one if empty). | `string` | `""` | no |
 | `create_cur_bucket` | Create the CUR S3 bucket. | `bool` | `true` | no |
-| `create_opsima_organizational_unit` | Create the Opsima OU (only if `opsima_organizational_unit_id` is empty). | `bool` | `true` | no |
-| `enable_opsima_handshake` | Send the completion notice to Opsima (as a nested CloudFormation stack). | `bool` | `true` | no |
-| `opsima_handshake_sns_topic_arn` | Override the handshake SNS topic. | `string` | Opsima's published topic | no |
-| `cloudformation_stack_version` | Value reported to Opsima as `CloudFormationStackVersion`. | `string` | `"10"` | no |
 | `role_name` | Name of the IAM role. | `string` | `"OpsimaRemoteAccessRole"` | no |
 | `tags` | Extra tags merged onto every taggable resource. | `map(string)` | `{}` | no |
 
@@ -111,41 +101,54 @@ CloudFormation equivalent.
 
 | Name | Description |
 |---|---|
-| `role_arn` | ARN of `OpsimaRemoteAccessRole` (same as the CFN stack's `RoleArn` output). |
+| `role_arn` | ARN of `OpsimaRemoteAccessRole`. Paste into Opsima's UI. |
+| `organizational_unit_id` | ID of the Opsima OU (the handshake used to send this to Opsima). |
+
+## Security model
+
+The role hands a third party (Opsima) organization-level permissions. The
+Opsima OU is the boundary: the risky grants are scoped, via
+`aws:ResourceOrgPaths`, so they can only reach accounts at the org root or
+inside the Opsima OU — never accounts sitting in your own OUs.
+
+- **`organizations:MoveAccount`** — the account being moved must currently be
+  at the org root or already inside the Opsima OU. An account in one of your
+  own OUs matches neither, so Opsima can't pull it out.
+- **`sts:AssumeRole` into `OpsimaOrganizationAccountAccessRole`** is allowed
+  only in accounts that live under the Opsima OU, not any account in the org
+  that happens to have a role by that name.
+- The trust policy only lets Opsima's account assume the role, and only with
+  the `sts:ExternalId` Opsima issued you.
+
+Opsima never gets `iam:*`, `organizations:LeaveOrganization`,
+`organizations:RemoveAccountFromOrganization`, billing write access outside
+invoice units, or any path to your root credentials.
+
+### Residual risk / defence in depth
+
+The `aws:ResourceOrgPaths` scoping assumes your production and management
+accounts live in their own OUs, **not directly at the org root** — Opsima can
+move and assume into anything sitting at the root. So:
+
+- Keep no account you care about directly under the org root; put them in OUs.
+
 
 ## Where this differs from the CloudFormation template
 
-CloudFormation and Terraform don't map 1:1, so a few things were adapted
-rather than translated literally:
-
-- **`DeletionPolicy: RetainExceptOnCreate`** has no Terraform equivalent. The
-  CUR bucket carries `lifecycle { prevent_destroy = true }` to approximate it,
-  so `terraform destroy` (or removing it from config, or flipping
-  `create_cur_bucket` to `false`) errors until you `terraform state rm` it
-  first. The OU has no such guard — Terraform will delete it on destroy.
-- **`AccessControl: BucketOwnerFullControl`** on the CUR bucket was dropped.
-  Modern S3 buckets default to ACLs disabled (`BucketOwnerEnforced`), which
-  already gives the bucket owner full control — no canned ACL needed. Add
-  `aws_s3_bucket_ownership_controls` + `aws_s3_bucket_acl` back in if some
-  downstream consumer truly requires ACLs.
-- **`Custom::OpsimaHandshake`** (the SNS notification that tells Opsima's
-  backend the role exists) is kept verbatim, but run as a one-resource nested
-  CloudFormation stack via `aws_cloudformation_stack.opsima_handshake`.
-  CloudFormation performs the publish exactly as it does for the original
-  template — same payload, same Create/Update/Delete lifecycle — so nothing is
-  reverse-engineered. The apply credentials need `cloudformation:CreateStack`
-  / `UpdateStack` / `DeleteStack` / `DescribeStacks`; no `aws` CLI or extra
-  Terraform provider is required. Set `enable_opsima_handshake = false` to skip
-  it and onboard from Opsima's UI instead.
-- Everything else (the role, its trust policy with the `sts:ExternalId`
-  condition, the inline policy statements, the OU, and the bucket policy
-  statements) is a direct, statement-for-statement translation of the
-  original template.
-
-## Security note
-
-This role grants a third party (Opsima) `organizations:CreateAccount`,
-`organizations:MoveAccount`, `sts:AssumeRole` into any
-`OpsimaOrganizationAccountAccessRole`, and read access to your Cost & Usage
-Reports. Review these permissions against your own policies before applying,
-the same way you would before launching the original CloudFormation stack.
+- **`Custom::OpsimaHandshake`** is dropped. It published to an Opsima-owned SNS
+  topic via a custom-resource Lambda; there is no native Terraform primitive
+  for it and we don't ship CloudFormation. Finish onboarding from Opsima's UI
+  with the `role_arn` and `organizational_unit_id` outputs.
+- **The OU is mandatory and module-owned.** The CFN template let you pass an
+  existing OU id or skip it; here it is always created, because the IAM policy
+  scoping is anchored to it.
+- **`DeletionPolicy: RetainExceptOnCreate`** on the CUR bucket is approximated
+  with `lifecycle { prevent_destroy = true }`, so `terraform destroy` (or
+  flipping `create_cur_bucket` to `false`) errors until you `terraform state rm`
+  the bucket first. The OU has no such guard.
+- **`AccessControl: BucketOwnerFullControl`** on the CUR bucket was dropped —
+  modern S3 buckets default to ACLs disabled (`BucketOwnerEnforced`), which
+  already gives the owner full control.
+- The `MoveAccount` and `AssumeRole` statements are **tightened** relative to
+  the CFN template (see Security model); everything else is a
+  statement-for-statement translation.
