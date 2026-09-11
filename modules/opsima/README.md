@@ -14,10 +14,8 @@ It creates:
 - The `OpsimaRemoteAccessRole` IAM role (assumable only by Opsima's account,
   gated by an external ID) and its inline policy.
 
-Onboarding is finished by pasting the `role_arn` and `organizational_unit_id`
-outputs into Opsima's UI. The old `Custom::OpsimaHandshake` SNS notification is
-**not** implemented — it required a nested CloudFormation stack, which we don't
-ship.
+Onboarding is finished with a manual `aws sns publish` (see
+[Completing onboarding](#completing-onboarding-handshake) below).
 
 ## Usage
 
@@ -104,6 +102,45 @@ variable "organization_root_id" { type = string }
 | `role_arn` | ARN of `OpsimaRemoteAccessRole`. Paste into Opsima's UI. |
 | `organizational_unit_id` | ID of the Opsima OU (the handshake used to send this to Opsima). |
 
+## Completing onboarding (handshake)
+
+The original CFN template ends with `Custom::OpsimaHandshake`, a custom
+resource that publishes to an SNS topic Opsima owns so their backend picks up
+the new role. To avoid CloudFormation, publish the same
+payload directly instead, after `terraform apply` providing outputs and IDs:
+
+```bash
+aws sns publish \
+  --region eu-west-1 \
+  --topic-arn arn:aws:sns:eu-west-1:539247457822:OpsimaLimitedAccessRoleSetup \
+  --message "$(cat <<EOF
+{
+  "RequestType": "Create",
+  "ResponseURL": "https://example.com/no-cfn-stack-behind-this",
+  "StackId": "manual-handshake-$(date +%s)",
+  "RequestId": "$(uuidgen)",
+  "LogicalResourceId": "OpsimaHandshake",
+  "ResourceType": "Custom::OpsimaHandshake",
+  "ResourceProperties": {
+    "ServiceToken": "arn:aws:sns:eu-west-1:539247457822:OpsimaLimitedAccessRoleSetup",
+    "CloudFormationStackVersion": "10",
+    "CloudFormationStackType": "full",
+    "RoleArn": "<role_arn output>",
+    "ExternalID": "<your external_id>",
+    "OrganizationId": "<your organization_id>",
+    "OrganizationRootId": "<your organization_root_id>",
+    "OpsimaOrganizationalUnitId": "<organizational_unit_id output>",
+    "OpsimaInvoiceUnitArn": ""
+  }
+}
+EOF
+)"
+```
+
+**Caveat:** unlike a real CloudFormation stack, there's no feedback loop — a
+successful publish only confirms delivery with MessageID, not that Opsima's backend
+registered the connection. Verify with Opsima Dashboard afterward.
+
 ## Security model
 
 The role hands a third party (Opsima) organization-level permissions. The
@@ -135,10 +172,10 @@ move and assume into anything sitting at the root. So:
 
 ## Where this differs from the CloudFormation template
 
-- **`Custom::OpsimaHandshake`** is dropped. It published to an Opsima-owned SNS
-  topic via a custom-resource Lambda; there is no native Terraform primitive
-  for it and we don't ship CloudFormation. Finish onboarding from Opsima's UI
-  with the `role_arn` and `organizational_unit_id` outputs.
+- **`Custom::OpsimaHandshake`** is not run as a CFN custom resource. Identical payload to Opsima's
+  SNS topic neeeds to be pushed via plain `aws sns publish` instead (see
+  [Completing onboarding](#completing-onboarding-handshake)); same topic, same
+  message shape, no CFN stack behind it.
 - **The OU is mandatory and module-owned.** The CFN template let you pass an
   existing OU id or skip it; here it is always created, because the IAM policy
   scoping is anchored to it.
