@@ -34,6 +34,16 @@ resource "aws_s3_bucket_versioning" "cur" {
   }
 }
 
+resource "aws_s3_bucket_public_access_block" "cur" {
+  count  = var.create_cur_bucket ? 1 : 0
+  bucket = aws_s3_bucket.cur[0].id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
 data "aws_iam_policy_document" "cur" {
   count = var.create_cur_bucket ? 1 : 0
 

@@ -6,8 +6,9 @@ reusable module.
 It creates:
 
 - An optional S3 bucket for Cost & Usage Reports (`opsima-cur-<customer_short_id>`)
-  with a bucket policy that denies insecure transport and allows the
-  `bcm-data-exports.amazonaws.com` service to write reports.
+  with S3 Block Public Access fully enabled and a bucket policy that denies
+  insecure transport and allows the `bcm-data-exports.amazonaws.com` service
+  to write reports.
 - The Opsima Organizational Unit (`opsima-<customer_short_id>`) for
   Opsima-managed accounts. Always created by this module — it is the boundary
   the security model depends on, so it is not an input.
